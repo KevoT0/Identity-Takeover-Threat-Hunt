@@ -1,22 +1,27 @@
 # Threat Hunt: Okta Account Takeover from Anomalous Geolocation
- 
-**Lab environment:** Microsoft Sentinel Training Lab dataset (`OktaV2_CL`)
-**SC-200 domain:** Perform threat hunting · Respond to security incidents
-**Detection surface:** Microsoft Sentinel (Defender portal) · KQL
+
+**Platform:** Microsoft Sentinel · KQL · Okta identity logs
+**Domain:** Threat Hunting · Identity compromise · Incident response
+**Detection surface:** Microsoft Sentinel (Defender portal) — `OktaV2_CL`
 
 ---
 
-## Summary
+## The problem — a real-world attack, not a hypothetical
 
-While hunting for signs of credential compromise across Okta sign-in data, I identified a single user account authenticating from a country that broke the organisation's baseline. Pivoting on that account surfaced a full account-takeover chain executed from Russia against a US-based tenant: the attacker seized super-admin privileges, planted their own MFA and an API token for persistence, and dismantled the legitimate users' MFA. All actions were recorded within the same second, indicating scripted rather than manual activity.
+In **October 2023, Okta** itself disclosed a breach of its support case management system: an attacker used a **stolen credential** to access the system and view files uploaded by customers, including session tokens that could be used to impersonate legitimate users. Downstream, this contributed to intrusion attempts against Okta customers such as **1Password, Cloudflare, and BeyondTrust**. [1][2]
 
-**Verdict:** True positive active, in-progress tenant compromise. Critical severity.
+The pattern is the defining threat of modern cloud security: **identity is the perimeter**. An attacker rarely "breaks in" through a firewall anymore — they log in with a stolen credential and operate as a trusted user. Once inside an identity provider, they move fast to make their access permanent: granting themselves privilege, minting API tokens, and hijacking MFA so that even a password reset won't lock them out. The detection challenge is that these logins look legitimate — the signal is not *that* someone logged in, but *from where*, and *what they did next*.
 
----
+## What this project is — and the skills it proves
 
-## Environment note
+This project is a **hypothesis-driven threat hunt** in Microsoft Sentinel that detects an Okta account takeover not from a fired alert, but by baselining normal behaviour and spotting the outlier. It reconstructs the full takeover chain and defines a containment response ordered to actually lock the attacker out — accounting for the persistence mechanisms a naive response would miss.
 
-This investigation was performed in a lab tenant using Microsoft's Sentinel Training Lab dataset. The Okta data lands in a custom table (`OktaV2_CL`), so column names differ from a production Okta ingestion, but the hunting logic and investigative reasoning transfer directly to a live environment.
+| Real-world failure | Capability this project builds |
+|---|---|
+| Stolen credentials produce legitimate-looking logins | Behavioural baselining to surface geographic anomalies |
+| Attacker makes access permanent before anyone notices | Attack-chain reconstruction exposing persistence (API token, planted MFA) |
+| Password reset leaves the attacker still inside | Containment ordered to revoke sessions + tokens + MFA, not just the password |
+| Analyst confuses attacker and victim accounts | Explicit actor-vs-target disambiguation to direct response correctly |
 
 ---
 
@@ -34,7 +39,7 @@ Threat intelligence indicated that stolen Okta credentials for the organisation 
 
 Rather than starting from an alert, I baselined *where each user normally logs in from* by counting successful sign-ins per user, per country.
 
-![Baseline hunt showing mirage logging in from RU against an all-US baseline](https://github.com/KevoT0/Okta-Account-Takeover/blob/main/3.png)
+![Baseline hunt showing mirage logging in from RU against an all-US baseline](3.png)
 
 ```KQL
 OktaV2_CL
@@ -67,7 +72,7 @@ OktaV2_CL
 | order by TimeGenerated asc
 ```
 
-![mirage's attack chain: super admin grant, API token creation, MFA manipulation](https://github.com/KevoT0/Okta-Account-Takeover/blob/main/4.png)
+![mirage's attack chain: super admin grant, API token creation, MFA manipulation](4.png)
 
 ---
 
@@ -87,6 +92,8 @@ The pivot revealed a textbook account-takeover and tenant-seizure chain, all att
 **Key observation — automation:** Every event carried an identical timestamp (`Aug 8, 2026 12:09:52 PM`). A human operating the Okta console cannot grant a role, mint a token, enrol a factor, and reset MFA within the same second. The uniform timestamp indicates the actions were executed by a script or API automation, not manual clicks.
 
 **Actor vs. target:** `mirage@pkwork` is the *attacker-controlled account* performing the actions. The `CEO` and `Priya Sharma` accounts are *victims* the attacker acted upon. Distinguishing actor from target is essential so response effort is directed at the right accounts.
+
+**Verdict:** True positive — active, in-progress tenant compromise. Critical severity.
 
 ---
 
@@ -118,22 +125,38 @@ The critical insight driving the response order: **a password reset alone does n
 
 ---
 
-## Lessons learned
+## Key design decisions
 
-- **Hunting beats waiting for alerts.** This chain was surfaced by baselining normal behaviour and spotting the outlier — not from a fired alert.
-- **Containment means closing every path, not just the obvious one.** Password resets do not revoke API tokens or attacker-registered MFA. Sessions, tokens, and MFA factors must all be addressed.
-- **Reset ≠ re-enable.** Resetting MFA factors wipes attacker-planted factors; merely "re-enabling" MFA can leave the attacker's device attached.
-- **Preserve before you purge.** Deleting the attacker account destroys evidence; disable and investigate first.
-- **Uniform timestamps are a tell.** Same-second activity across multiple sensitive operations points to scripted/API-driven attacks.
+- **Hunt, don't wait for alerts.** The chain was surfaced by baselining normal behaviour and spotting the outlier — a proactive hunt, not a reactive response to a fired rule.
+- **Containment closes every path, not just the obvious one.** Password resets do not revoke API tokens or attacker-registered MFA; sessions, tokens, and MFA factors are all addressed, in an order that cuts active access first.
+- **Reset, don't merely re-enable.** Resetting MFA factors wipes attacker-planted factors; "re-enabling" MFA can leave the attacker's device attached.
+- **Preserve before you purge.** The attacker account is disabled and retained for forensics, not deleted — destroying it would destroy the evidence trail.
+- **Disambiguate actor from target.** Response effort is directed at the attacker-controlled account and the victim accounts separately, so remediation lands on the right objects.
+
+---
+
+## Future improvements
+
+- **Operationalise as an analytics rule** — convert the baseline-and-anomaly logic into a scheduled Sentinel rule with entity mapping, so a geographic outlier raises an incident automatically.
+- **Impossible-travel enrichment** — add distance/time calculation between consecutive logins to distinguish a true takeover from a VPN or legitimate travel.
+- **Cross-platform correlation** — join this identity activity to endpoint and cloud telemetry to establish whether the same actor pivoted beyond Okta.
+- **Automated containment playbook** — a SOAR playbook that revokes sessions and tokens and disables the account on confirmation, with destructive steps gated behind analyst approval.
 
 ---
 
 ## Skills demonstrated
 
-· Threat hunting with KQL 
-· Behavioural baselining 
-· Pivot investigation 
-· Attack-chain reconstruction 
-· Identity-first incident response 
-· MITRE ATT&CK mapping 
+· Threat hunting with KQL
+· Behavioural baselining
+· Pivot investigation
+· Attack-chain reconstruction
+· Identity-first incident response
+· MITRE ATT&CK mapping
 · Okta / cloud identity security
+
+---
+
+## References
+
+1. Okta Security — [Tracking Unauthorized Access to Okta's Support System](https://sec.okta.com/articles/2023/10/tracking-unauthorized-access-oktas-support-system/) (October 2023).
+2. BleepingComputer — [Okta says its support system was breached using stolen credentials](https://www.bleepingcomputer.com/news/security/okta-says-its-support-system-was-breached-using-stolen-credentials/) (affected customers include 1Password, Cloudflare, BeyondTrust).
